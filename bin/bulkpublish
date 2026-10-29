@@ -123,6 +123,20 @@ media_type() {
   esac
 }
 
+# check_file PATH -> sets MIME and SIZE, or fails saying what is wrong with it.
+check_file() {
+  local path="$1" name="${1##*/}"
+  [ -f "$path" ] && [ -r "$path" ] || fail "Can't read $name. It may have been moved or deleted."
+  MIME="$(media_type "$name")"
+  [ -n "$MIME" ] || fail "$name isn't a file type BulkPublish can post. Use an image (JPEG, PNG, WebP, GIF), a video (MP4, MOV, WebM), or a PDF, Word or PowerPoint file."
+  SIZE="$(wc -c <"$path" | tr -d '[:space:]')"
+  [ "$SIZE" -gt 0 ] || fail "$name is empty."
+  case "$MIME" in
+    video/*) [ "$SIZE" -le $((1024 * MB)) ] || fail "$name is larger than 1 GB, the limit for videos." ;;
+    *) [ "$SIZE" -le $((100 * MB)) ] || fail "$name is larger than 100 MB, the limit for images and documents." ;;
+  esac
+}
+
 # upload PATH -> appends the new media file's id to UPLOADED.
 #
 # The bytes go in on stdin, and everything that names the file (its name, the
@@ -131,11 +145,8 @@ media_type() {
 upload() {
   local path="$1" name safe mime size out id
   name="${path##*/}"
-  [ -f "$path" ] && [ -r "$path" ] || fail "Can't read $name. It may have been moved or deleted."
-  mime="$(media_type "$name")"
-  [ -n "$mime" ] || fail "$name isn't a file type BulkPublish can post. Use an image (JPEG, PNG, WebP, GIF), a video (MP4, MOV, WebM), or a PDF, Word or PowerPoint file."
-  size="$(wc -c <"$path" | tr -d '[:space:]')"
-  [ "$size" -gt 0 ] || fail "$name is empty."
+  check_file "$path"
+  mime="$MIME" size="$SIZE"
   # The name sits inside a quoted curl config value, where only a quote, a
   # backslash or a control character would need escaping. Swap those out.
   safe="${name//[\"\\[:cntrl:]]/_}"
@@ -147,8 +158,6 @@ upload() {
       fail "Couldn't upload $name. Check your connection and try again."
     settle "$out"
   else
-    case "$mime" in video/*) ;; *) fail "$name is larger than 100 MB, the limit for images and documents." ;; esac
-    [ "$size" -le $((1024 * MB)) ] || fail "$name is larger than 1 GB, the limit for videos."
     upload_large "$path" "$name" "$mime" "$size"
   fi
   id="$(jq -r '.file.id // empty' <<<"$BODY")"
@@ -281,10 +290,7 @@ case "$cmd" in
     [[ "$ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "Pick at least one channel."
     [ -n "${text//[[:space:]]/}" ] || [ "${#files[@]}" -gt 0 ] || fail "Write something or add media first."
     # Check every file before any is uploaded, so one bad file costs nothing.
-    for f in "${files[@]+"${files[@]}"}"; do
-      [ -f "$f" ] && [ -r "$f" ] || fail "Can't read ${f##*/}. It may have been moved or deleted."
-      [ -n "$(media_type "$f")" ] || fail "${f##*/} isn't a file type BulkPublish can post."
-    done
+    for f in "${files[@]+"${files[@]}"}"; do check_file "$f"; done
     # Check a typed time before anything is sent, so a typo costs nothing.
     AT="" LABEL=""
     [ "$mode" = at ] && when_at "${3:-}"
@@ -315,9 +321,13 @@ case "$cmd" in
     id="$(jq -r '.id // empty' <<<"$BODY")"
     [[ "$id" =~ ^[0-9]+$ ]] || fail "BulkPublish didn't return the new post."
     if [ "$mode" = now ]; then
-      if ! out="$(api POST "/api/posts/$id/publish")" || [ -n "$out" ]; then
+      # Both calls run in subshells that leave the uploads to the clean-up
+      # below, so the post goes first and its media once, after it.
+      if ! out="$(UPLOADED=(); api POST "/api/posts/$id/publish")" || [ -n "$out" ]; then
         # Publishing refused: take the draft back out so nothing half-made is left.
-        api DELETE "/api/posts/$id" >/dev/null 2>&1
+        # In a subshell, because a failed delete would otherwise end the script
+        # here and the user would never see why publishing was refused.
+        ( UPLOADED=(); api DELETE "/api/posts/$id" ) >/dev/null 2>&1
         forget_uploads
         echo "$out"; exit 0
       fi

@@ -24,27 +24,44 @@ TYPES = [
 ]
 
 
+# Give up on a picker nobody answers, so the panel's button cannot stay on
+# "Choosing…" forever if the portal goes away mid-request.
+TIMEOUT_SECONDS = 15 * 60
+
+
 def main():
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     token = "bulkpublish_" + secrets.token_hex(8)
     sender = bus.get_unique_name()[1:].replace(".", "_")
-    handle = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+    # Where the portal will answer. It names the path from our token, and
+    # OpenFile returns it too; both are accepted below.
+    handles = {f"/org/freedesktop/portal/desktop/request/{sender}/{token}"}
     loop = GLib.MainLoop()
-    result = {"files": []}
+    result = {"files": [], "error": None}
 
-    def on_response(_conn, _sender, _path, _iface, _signal, params):
-        code, results = params.unpack()
-        if code == 0:
-            for uri in results.get("uris", []):
-                path = Gio.File.new_for_uri(uri).get_path()
-                if path:
-                    result["files"].append(path)
+    def on_response(_conn, _sender, path, _iface, _signal, params):
+        if path not in handles:
+            return
+        try:
+            code, results = params.unpack()
+            if code == 0:
+                for uri in results.get("uris", []):
+                    local = Gio.File.new_for_uri(uri).get_path()
+                    if local:
+                        result["files"].append(local)
+        except Exception:
+            result["error"] = True
         loop.quit()
+
+    def on_timeout():
+        result["error"] = True
+        loop.quit()
+        return False
 
     # Subscribe before asking, so an instant answer cannot be missed.
     bus.signal_subscribe(
         "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request", "Response",
-        handle, None, Gio.DBusSignalFlags.NONE, on_response)
+        None, None, Gio.DBusSignalFlags.NONE, on_response)
 
     options = {
         "handle_token": GLib.Variant("s", token),
@@ -54,13 +71,17 @@ def main():
             ("Images, videos and documents", [(1, t) for t in TYPES]),
         ]),
     }
-    bus.call_sync(
+    reply = bus.call_sync(
         "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
         "org.freedesktop.portal.FileChooser", "OpenFile",
         GLib.Variant("(ssa{sv})", ("", "Add media to your post", options)),
         GLib.VariantType("(o)"), Gio.DBusCallFlags.NONE, -1, None)
+    handles.add(reply.unpack()[0])
 
+    GLib.timeout_add_seconds(TIMEOUT_SECONDS, on_timeout)
     loop.run()
+    if result["error"]:
+        sys.exit(1)
     print(json.dumps({"ok": True, "files": result["files"]}))
 
 

@@ -4,8 +4,9 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// BulkPublish in the bar: write a post, pick channels, post it now or keep it
-// as a draft, and see how the last few posts went.
+// BulkPublish in the bar: write a post, attach media, pick channels, then post
+// it now, queue it, schedule it or keep it as a draft, and see how the last few
+// posts went.
 //
 // Every request goes through bin/bulkpublish, run with an argv array and never
 // through a shell. That script is the only thing that reads the API key, so the
@@ -247,10 +248,11 @@ Panel {
     stdout: StdioCollector {
       onStreamFinished: {
         var data = root.parse(text)
+        // The picker took focus away; bring the panel back first, because
+        // opening clears the notice that attach() may be about to set.
+        root.open()
         if (data.ok !== true) { root.notice = root.plain(data.error); return }
         root.attach(data.files || [])
-        // The picker took focus away; bring the panel back with the files on it.
-        root.open()
       }
     }
   }
@@ -430,7 +432,8 @@ Panel {
                 anchors.fill: parent
                 keys: ["text/uri-list"]
                 onDropped: function(event) {
-                  if (!event.hasUrls) return
+                  // A file added mid-send would be cleared, unsent, when it succeeds.
+                  if (!event.hasUrls || root.sending) return
                   root.attach(event.urls)
                   event.acceptProposedAction()
                 }

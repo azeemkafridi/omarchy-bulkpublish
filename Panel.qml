@@ -45,6 +45,11 @@ Panel {
   property string whenLabel: ""
   property string whenError: ""
 
+  // Local paths of the files to attach, in the order they will appear.
+  property var attachments: []
+  readonly property var mediaExtensions:
+    ["jpg", "jpeg", "png", "webp", "gif", "mp4", "m4v", "mov", "webm", "pdf", "doc", "docx", "ppt", "pptx"]
+
   readonly property int selectedCount: {
     var n = 0
     for (var k in selected) if (selected[k]) n++
@@ -83,10 +88,36 @@ Panel {
     selected = next
   }
 
+  function fileName(path) {
+    return String(path).split("/").pop()
+  }
+
+  // Add files from the picker or a drop. Duplicates are skipped, and so is
+  // anything BulkPublish cannot post, with a note saying which.
+  function attach(paths) {
+    var next = attachments.slice()
+    var skipped = []
+    for (var i = 0; i < paths.length; i++) {
+      var p = String(paths[i])
+      if (p.indexOf("file://") === 0) p = decodeURIComponent(p.slice(7))
+      if (p === "" || next.indexOf(p) !== -1) continue
+      var ext = p.split(".").pop().toLowerCase()
+      if (mediaExtensions.indexOf(ext) === -1) { skipped.push(fileName(p)); continue }
+      next.push(p)
+    }
+    attachments = next
+    notice = skipped.length ? root.plain("Can't post " + skipped.join(", ")
+      + ". Use images, videos (MP4, MOV, WebM), or PDF, Word or PowerPoint files.") : ""
+  }
+
+  function detach(path) {
+    attachments = attachments.filter(function(p) { return p !== path })
+  }
+
   function send(mode) {
     var ids = []
     for (var k in selected) if (selected[k]) ids.push(k)
-    if (composer.text.trim() === "") { notice = "Write something first."; return }
+    if (composer.text.trim() === "" && attachments.length === 0) { notice = "Write something or add media first."; return }
     if (ids.length === 0) { notice = "Pick at least one channel."; return }
     if (mode === "at" && whenLabel === "") {
       notice = whenError
@@ -98,9 +129,9 @@ Panel {
     notice = ""
     sending = true
     sendProc.mode = mode
-    // The text goes in on stdin, never in argv: another local account can
-    // read any process's command line while it runs.
-    sendProc.pendingText = composer.text
+    // Text and file paths go in on stdin, never in argv: another local account
+    // can read any process's command line while it runs.
+    sendProc.pendingText = JSON.stringify({ text: composer.text, files: attachments })
     sendProc.stdinEnabled = true
     run(sendProc, ["send", mode, ids.join(",")].concat(mode === "at" ? [whenInput.text] : []))
   }
@@ -188,6 +219,7 @@ Panel {
         var data = root.parse(text)
         if (data.ok !== true) { root.notice = root.plain(data.error); return }
         composer.text = ""
+        root.attachments = []
         root.notice = sendProc.mode === "now" ? "Sent. It's publishing now."
           : sendProc.mode === "draft" ? "Saved as a draft."
           : "Scheduled for " + root.plain(data.label) + "."
@@ -209,6 +241,19 @@ Panel {
   }
 
   Process { id: openProc }
+
+  Process {
+    id: pickProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var data = root.parse(text)
+        if (data.ok !== true) { root.notice = root.plain(data.error); return }
+        root.attach(data.files || [])
+        // The picker took focus away; bring the panel back with the files on it.
+        root.open()
+      }
+    }
+  }
 
   Process {
     id: whenProc
@@ -375,9 +420,21 @@ Panel {
               width: parent.width
               height: Math.max(Style.space(90), composer.contentHeight + Style.space(16))
               color: "transparent"
-              border.width: 1
-              border.color: composer.activeFocus ? root.foreground : root.dim
+              border.color: composer.activeFocus || drop.containsDrag ? root.foreground : root.dim
+              border.width: drop.containsDrag ? 2 : 1
               radius: Style.space(4)
+
+              // Files dragged in from the file manager are attached.
+              DropArea {
+                id: drop
+                anchors.fill: parent
+                keys: ["text/uri-list"]
+                onDropped: function(event) {
+                  if (!event.hasUrls) return
+                  root.attach(event.urls)
+                  event.acceptProposedAction()
+                }
+              }
 
               TextEdit {
                 id: composer
@@ -403,11 +460,41 @@ Panel {
               Text {
                 visible: composer.text === "" && !composer.activeFocus
                 anchors.fill: composer
-                text: "What do you want to post?"
+                text: "What do you want to post? Drop images or videos here."
+                wrapMode: Text.Wrap
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 textFormat: Text.PlainText
+              }
+            }
+
+            // Attached files, each removable, then the button that adds more.
+            Flow {
+              width: parent.width
+              spacing: Style.space(6)
+              Repeater {
+                model: root.attachments
+                Button {
+                  required property var modelData
+                  text: root.plain(root.fileName(modelData)) + "  ×"
+                  enabled: !root.sending
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  onClicked: root.detach(modelData)
+                }
+              }
+              Button {
+                text: pickProc.running ? "Choosing…" : "+ Add media"
+                enabled: !root.sending && !pickProc.running
+                opacity: enabled ? 1 : 0.45
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                onClicked: root.run(pickProc, ["pick"])
               }
             }
 
@@ -544,7 +631,7 @@ Panel {
             Row {
               spacing: Style.space(8)
               Button {
-                text: root.sending ? "Sending…"
+                text: root.sending ? (root.attachments.length ? "Uploading…" : "Sending…")
                   : root.postWhen === "queue" ? "Add to queue"
                   : root.postWhen === "at" ? "Schedule"
                   : "Post now"

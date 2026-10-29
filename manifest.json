@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "id": "com.bulkpublish.omarchy",
   "name": "BulkPublish",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "BulkPublish",
   "license": "MIT",
   "homepage": "https://www.bulkpublish.com",
-  "description": "Post to your social channels from the bar: write, pick channels, then post now, add it to your queue, schedule it for a time, or save a draft. Retry anything that failed.",
+  "description": "Post to your social channels from the bar: write, attach images, videos or documents, pick channels, then post now, add it to your queue, schedule it for a time, or save a draft. Retry anything that failed.",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "Panel.qml"
   },
   "barWidget": {
     "displayName": "BulkPublish",
-    "description": "Write a post, pick channels, and post now, queue it, schedule it or save a draft. Shows your recent posts and lets you retry failed ones.",
+    "description": "Write a post, attach media, pick channels, and post now, queue it, schedule it or save a draft. Shows your recent posts and lets you retry failed ones.",
     "category": "Productivity",
     "aliases": ["bulkpublish", "social", "post", "publish", "schedule"],
     "allowMultiple": false,

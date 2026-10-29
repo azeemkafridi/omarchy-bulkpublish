@@ -1,16 +1,17 @@
 # BulkPublish for Omarchy
 
 Post to your social channels without leaving the desktop. A paper-plane icon in
-the Omarchy bar opens a small composer: write the post, pick the channels, and
-post it now, add it to your queue, schedule it for a time you type, or save it as
-a draft to finish in BulkPublish. Your most recent
+the Omarchy bar opens a small composer: write the post, attach images, videos or
+documents, pick the channels, and post it now, add it to your queue, schedule it
+for a time you type, or save it as a draft to finish in BulkPublish. Your most recent
 posts are listed underneath with how they went, and anything that failed can be
 retried in one click. The icon lights up when a recent post failed.
 
 ## Requirements
 
 - Omarchy Quattro with shell plugin support
-- `curl` and `jq` (both ship with Omarchy)
+- `curl`, `jq` and `python3` with GObject (all ship with Omarchy; `python3` is
+  only used to open the file picker)
 - A BulkPublish account with at least one connected channel
 
 ## Install
@@ -50,7 +51,14 @@ Under **When**, choose:
   panel shows the exact date it understood before you schedule, in your
   computer's timezone.
 
-**Save draft** keeps it in BulkPublish, where you can add media or tailor it per
+**Media**: click **+ Add media** to choose files in your desktop's file picker,
+or drag files from the file manager onto the text box. Images (JPEG, PNG, WebP,
+GIF), videos (MP4, MOV, WebM) and PDF, Word or PowerPoint files can be attached,
+several at once. Images and documents can be up to 100 MB and videos up to 1 GB.
+Click a file's name to remove it before posting. If a post can't be created,
+anything uploaded for it is removed again.
+
+**Save draft** keeps it in BulkPublish, where you can tailor it per
 network. Channels that need reconnecting are shown greyed out; reconnect them in
 BulkPublish.
 
@@ -82,7 +90,7 @@ The plugin talks only to `app.bulkpublish.com`, using your API key, and opens
 links in your default browser. It runs no installer, needs no root access, and
 changes no other configuration.
 
-Your post text and API key are never put on a command line, so other accounts
+Your post text, attached file names and API key are never put on a command line, so other accounts
 on the same machine cannot read them from the process list. The key is saved
 readable by you only.
 

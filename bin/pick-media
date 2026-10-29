@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+# Opens the desktop's file picker and prints the chosen files as one JSON
+# object: {"ok":true,"files":["/path",...]}. Cancelling prints an empty list.
+#
+# It asks the desktop portal (org.freedesktop.portal.FileChooser), which every
+# Omarchy install runs, rather than drawing its own dialog. The portal answers
+# on the caller's own connection and drops the request if the caller goes away,
+# so this stays connected until the user has chosen; a one-shot `gdbus call`
+# could not. Run by `bulkpublish pick`; it reads nothing else and sends nothing
+# anywhere.
+import json
+import secrets
+import sys
+
+from gi.repository import Gio, GLib
+
+TYPES = [
+    "image/jpeg", "image/png", "image/webp", "image/gif",
+    "video/mp4", "video/quicktime", "video/webm",
+    "application/pdf", "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+]
+
+
+def main():
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    token = "bulkpublish_" + secrets.token_hex(8)
+    sender = bus.get_unique_name()[1:].replace(".", "_")
+    handle = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+    loop = GLib.MainLoop()
+    result = {"files": []}
+
+    def on_response(_conn, _sender, _path, _iface, _signal, params):
+        code, results = params.unpack()
+        if code == 0:
+            for uri in results.get("uris", []):
+                path = Gio.File.new_for_uri(uri).get_path()
+                if path:
+                    result["files"].append(path)
+        loop.quit()
+
+    # Subscribe before asking, so an instant answer cannot be missed.
+    bus.signal_subscribe(
+        "org.freedesktop.portal.Desktop", "org.freedesktop.portal.Request", "Response",
+        handle, None, Gio.DBusSignalFlags.NONE, on_response)
+
+    options = {
+        "handle_token": GLib.Variant("s", token),
+        "multiple": GLib.Variant("b", True),
+        "modal": GLib.Variant("b", True),
+        "filters": GLib.Variant("a(sa(us))", [
+            ("Images, videos and documents", [(1, t) for t in TYPES]),
+        ]),
+    }
+    bus.call_sync(
+        "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.FileChooser", "OpenFile",
+        GLib.Variant("(ssa{sv})", ("", "Add media to your post", options)),
+        GLib.VariantType("(o)"), Gio.DBusCallFlags.NONE, -1, None)
+
+    loop.run()
+    print(json.dumps({"ok": True, "files": result["files"]}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        sys.exit(1)

@@ -12,7 +12,9 @@
 #   bulkpublish channels         connected channels
 #   bulkpublish posts [limit]    recent posts, newest first
 #   bulkpublish send <now|draft|queue|at> <channel-ids,comma,separated> [when]
-#                                text on stdin; "at" takes a time like "fri 14:30"
+#                                stdin: {"text":"...","files":["/path",...]}
+#                                "at" takes a time like "fri 14:30"
+#   bulkpublish pick             choose media files in the desktop's file picker
 #   bulkpublish when <time>      how a typed time is understood, without posting
 #   bulkpublish retry <post-id>
 #   bulkpublish open [path]      open BulkPublish in the browser
@@ -22,7 +24,10 @@ API_BASE="${BULKPUBLISH_API_BASE:-https://app.bulkpublish.com}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/bulkpublish"
 KEY_FILE="$CONFIG_DIR/omarchy-api-key"
 
-fail() { jq -cn --arg e "$1" '{ok:false,error:$e}'; exit 0; }
+# Media uploaded for a post that then fails to be created is deleted again, so
+# a refused post leaves nothing behind in the library.
+UPLOADED=()
+fail() { forget_uploads; jq -cn --arg e "$1" '{ok:false,error:$e}'; exit 0; }
 
 # GNU date reads "tomorrow 9:00" and friends. Omarchy ships it as date; gdate is
 # for running this script on a Mac.
@@ -65,19 +70,10 @@ read_key() {
   [ -n "$KEY" ] || fail "No API key yet. Run the login command shown in the panel."
 }
 
-# api METHOD PATH [JSON-BODY]  -> sets BODY and CODE
-api() {
-  local method="$1" path="$2" data="${3:-}" out
-  local args=(-sS --max-time 30 -X "$method" -w '\n%{http_code}'
-    -H "Accept: application/json" -H "User-Agent: bulkpublish-omarchy/1.1.0")
-  # Neither the key nor the body is ever an argv value, because any local
-  # account can read a running process's command line. The key goes in as a
-  # header file on fd 3 and the body on stdin.
-  args+=(-H @/dev/fd/3)
-  if [ -n "$data" ]; then args+=(-H "Content-Type: application/json" --data-binary @-); fi
-  out="$(printf '%s' "$data" |
-    curl "${args[@]}" "$API_BASE$path" 3< <(printf 'Authorization: Bearer %s\n' "$KEY") 2>/dev/null)" ||
-    fail "Couldn't reach BulkPublish. Check your connection and try again."
+# settle OUTPUT -> sets BODY and CODE from "body\nstatus", or fails with a
+# message the panel can show as is.
+settle() {
+  local out="$1"
   CODE="$(tail -n 1 <<<"$out")"
   BODY="$(sed '$d' <<<"$out")"
   [[ "$CODE" =~ ^[0-9]{3}$ ]] || fail "Couldn't reach BulkPublish. Check your connection and try again."
@@ -93,6 +89,114 @@ api() {
     5*) fail "BulkPublish is having trouble right now. Try again in a few minutes." ;;
     *) fail "${msg:-BulkPublish returned an error ($CODE).}" ;;
   esac
+}
+
+# api METHOD PATH [JSON-BODY]  -> sets BODY and CODE
+api() {
+  local method="$1" path="$2" data="${3:-}" out
+  local args=(-sS --max-time 30 -X "$method" -w '\n%{http_code}'
+    -H "Accept: application/json" -H "User-Agent: bulkpublish-omarchy/1.2.0")
+  # Neither the key nor the body is ever an argv value, because any local
+  # account can read a running process's command line. The key goes in as a
+  # header file on fd 3 and the body on stdin.
+  args+=(-H @/dev/fd/3)
+  if [ -n "$data" ]; then args+=(-H "Content-Type: application/json" --data-binary @-); fi
+  out="$(printf '%s' "$data" |
+    curl "${args[@]}" "$API_BASE$path" 3< <(printf 'Authorization: Bearer %s\n' "$KEY") 2>/dev/null)" ||
+    fail "Couldn't reach BulkPublish. Check your connection and try again."
+  settle "$out"
+}
+
+MB=$((1024 * 1024))
+PART=$((10 * MB))
+
+# media_type NAME -> the MIME type BulkPublish accepts for it, or nothing.
+media_type() {
+  case "$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')" in
+    jpg|jpeg) echo image/jpeg ;; png) echo image/png ;; webp) echo image/webp ;;
+    gif) echo image/gif ;; mp4|m4v) echo video/mp4 ;; mov) echo video/quicktime ;;
+    webm) echo video/webm ;; pdf) echo application/pdf ;;
+    doc) echo application/msword ;;
+    docx) echo application/vnd.openxmlformats-officedocument.wordprocessingml.document ;;
+    ppt) echo application/vnd.ms-powerpoint ;;
+    pptx) echo application/vnd.openxmlformats-officedocument.presentationml.presentation ;;
+  esac
+}
+
+# upload PATH -> appends the new media file's id to UPLOADED.
+#
+# The bytes go in on stdin, and everything that names the file (its name, the
+# key, a large upload's signed storage links) goes in through a curl config on
+# fd 3, so none of it shows up in the process list.
+upload() {
+  local path="$1" name safe mime size out id
+  name="${path##*/}"
+  [ -f "$path" ] && [ -r "$path" ] || fail "Can't read $name. It may have been moved or deleted."
+  mime="$(media_type "$name")"
+  [ -n "$mime" ] || fail "$name isn't a file type BulkPublish can post. Use an image (JPEG, PNG, WebP, GIF), a video (MP4, MOV, WebM), or a PDF, Word or PowerPoint file."
+  size="$(wc -c <"$path" | tr -d '[:space:]')"
+  [ "$size" -gt 0 ] || fail "$name is empty."
+  # The name sits inside a quoted curl config value, where only a quote, a
+  # backslash or a control character would need escaping. Swap those out.
+  safe="${name//[\"\\[:cntrl:]]/_}"
+  if [ "$size" -le $((100 * MB)) ]; then
+    out="$(curl -sS --max-time 900 -w '\n%{http_code}' -H "Accept: application/json" \
+      -H "User-Agent: bulkpublish-omarchy/1.2.0" -K /dev/fd/3 "$API_BASE/api/media" <"$path" \
+      3< <(printf 'header = "Authorization: Bearer %s"\nform = "file=@-;filename=\\"%s\\";type=%s"\n' \
+             "$KEY" "$safe" "$mime") 2>/dev/null)" ||
+      fail "Couldn't upload $name. Check your connection and try again."
+    settle "$out"
+  else
+    case "$mime" in video/*) ;; *) fail "$name is larger than 100 MB, the limit for images and documents." ;; esac
+    [ "$size" -le $((1024 * MB)) ] || fail "$name is larger than 1 GB, the limit for videos."
+    upload_large "$path" "$name" "$mime" "$size"
+  fi
+  id="$(jq -r '.file.id // empty' <<<"$BODY")"
+  [[ "$id" =~ ^[0-9]+$ ]] || fail "BulkPublish didn't confirm the upload of $name."
+  UPLOADED+=("$id")
+}
+
+# Videos over 100 MB go up in 10 MB parts straight to storage. A part that
+# fails is retried on its own rather than restarting the whole file.
+upload_large() {
+  local path="$1" name="$2" mime="$3" size="$4" key upload_id count i url res etag parts="[]" urls
+  api POST /api/media/multipart/create "$(jq -cn --arg m "$mime" --argjson s "$size" '{contentType:$m,sizeBytes:$s}')"
+  urls="$BODY"
+  key="$(jq -r '.r2Key // empty' <<<"$urls")"
+  upload_id="$(jq -r '.uploadId // empty' <<<"$urls")"
+  count="$(jq -r '(.partUrls // []) | length' <<<"$urls")"
+  [ -n "$key" ] && [ -n "$upload_id" ] && [ "$count" -gt 0 ] || fail "BulkPublish couldn't start the upload of $name."
+  for ((i = 0; i < count; i++)); do
+    url="$(jq -r ".partUrls[$i]" <<<"$urls")"
+    [[ "$url" =~ ^https?://[^\"\\[:space:]]+$ ]] || fail "BulkPublish couldn't start the upload of $name."
+    etag=""
+    for _ in 1 2 3; do
+      # The file comes in by redirection, so its path is never an argument.
+      res="$(dd bs="$PART" skip="$i" count=1 iflag=fullblock <"$path" 2>/dev/null |
+        curl -sS --max-time 300 -X PUT --data-binary @- -o /dev/null -w '%{http_code} %header{etag}' \
+          -K /dev/fd/3 3< <(printf 'url = "%s"\n' "$url") 2>/dev/null)"
+      if [ "${res%% *}" = 200 ] && [ -n "${res#* }" ]; then etag="${res#* }"; break; fi
+    done
+    if [ -z "$etag" ]; then
+      ( api POST /api/media/multipart/abort "$(jq -cn --arg k "$key" --arg u "$upload_id" '{r2Key:$k,uploadId:$u}')" ) >/dev/null 2>&1
+      fail "Couldn't upload $name. Check your connection and try again."
+    fi
+    parts="$(jq -c --argjson n $((i + 1)) --arg e "$etag" '. + [{partNumber:$n,etag:$e}]' <<<"$parts")"
+  done
+  api POST /api/media/multipart/complete "$(jq -cn --arg k "$key" --arg u "$upload_id" --argjson p "$parts" \
+    --arg f "$name" --arg m "$mime" --argjson s "$size" \
+    '{r2Key:$k,uploadId:$u,parts:$p,fileName:$f,mimeType:$m,sizeBytes:$s}')"
+}
+
+# Delete what this run uploaded. Best effort and silent: it runs on the way out
+# of a failure, which has its own message to show.
+forget_uploads() {
+  local id
+  for id in "${UPLOADED[@]+"${UPLOADED[@]}"}"; do
+    curl -sS --max-time 20 -X DELETE -o /dev/null -K /dev/fd/3 "$API_BASE/api/media/$id" \
+      3< <(printf 'header = "Authorization: Bearer %s"\n' "${KEY:-}") >/dev/null 2>&1
+  done
+  UPLOADED=()
 }
 
 cmd="${1:-}"; shift || true
@@ -125,6 +229,14 @@ case "$cmd" in
   when)
     when_at "${1:-}"
     jq -cn --arg at "$AT" --arg label "$LABEL" '{ok:true,at:$at,label:$label}'
+    ;;
+  pick)
+    # The desktop's own file picker, through the portal every Omarchy install
+    # runs. A small helper holds the request open until the user answers.
+    command -v python3 >/dev/null 2>&1 || fail "Choosing files needs python3. You can drag files onto the panel instead."
+    out="$(python3 -I "$(dirname "$0")/pick-media" 2>/dev/null)" ||
+      fail "The file picker didn't open. You can drag files onto the panel instead."
+    printf '%s\n' "$out"
     ;;
   status)
     [ -r "$KEY_FILE" ] || { echo '{"ok":true,"signedIn":false}'; exit 0; }
@@ -159,11 +271,20 @@ case "$cmd" in
     ;;
   send)
     mode="${1:-}" ids="${2:-}"
-    # The post text arrives on stdin so it never appears in the process list.
-    text="$(cat)"
+    # Text and file paths arrive on stdin so they never appear in the process list.
+    input="$(cat)"
+    text="$(jq -r '.text // ""' <<<"$input" 2>/dev/null)" || fail "Write something first."
+    files=()
+    while IFS= read -r -d '' f; do files+=("$f"); done \
+      < <(jq -j '(.files // [])[] | tostring + "\u0000"' <<<"$input" 2>/dev/null)
     case "$mode" in now|draft|queue|at) ;; *) fail "Choose when to post it." ;; esac
     [[ "$ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "Pick at least one channel."
-    [ -n "${text//[[:space:]]/}" ] || fail "Write something first."
+    [ -n "${text//[[:space:]]/}" ] || [ "${#files[@]}" -gt 0 ] || fail "Write something or add media first."
+    # Check every file before any is uploaded, so one bad file costs nothing.
+    for f in "${files[@]+"${files[@]}"}"; do
+      [ -f "$f" ] && [ -r "$f" ] || fail "Can't read ${f##*/}. It may have been moved or deleted."
+      [ -n "$(media_type "$f")" ] || fail "${f##*/} isn't a file type BulkPublish can post."
+    done
     # Check a typed time before anything is sent, so a typo costs nothing.
     AT="" LABEL=""
     [ "$mode" = at ] && when_at "${3:-}"
@@ -178,13 +299,18 @@ case "$cmd" in
     # The body needs each channel's platform, so look them up rather than
     # trusting whatever the panel last saw.
     api GET /api/channels
-    body="$(jq -c --arg ids "$ids" --rawfile text <(printf '%s' "$text") '
+    channels="$(jq -c --arg ids "$ids" '
       ($ids | split(",") | map(tonumber)) as $want
-      | [(.channels // [])[] | select(.id as $i | $want | index($i)) | {channelId: .id, platform}] as $ch
-      | if ($ch | length) == 0 then error("none")
-        elif $at == "" then {content: $text, status: "draft", channels: $ch}
-        else {content: $text, status: "scheduled", scheduledAt: $at, timezone: $tz, channels: $ch} end' \
-      --arg at "$AT" --arg tz "$tz" <<<"$BODY" 2>/dev/null)" || fail "Those channels are no longer connected. Refresh and pick again."
+      | [(.channels // [])[] | select(.id as $i | $want | index($i)) | {channelId: .id, platform}]
+      | if length == 0 then error("none") else . end' <<<"$BODY" 2>/dev/null)" ||
+      fail "Those channels are no longer connected. Refresh and pick again."
+    for f in "${files[@]+"${files[@]}"}"; do upload "$f"; done
+    media="$(printf '%s\n' "${UPLOADED[@]+"${UPLOADED[@]}"}" | jq -cRs 'split("\n") | map(select(. != "") | tonumber)')"
+    body="$(jq -cn --rawfile text <(printf '%s' "$text") --argjson ch "$channels" --argjson media "$media" \
+      --arg at "$AT" --arg tz "$tz" '
+      {content: $text, channels: $ch}
+      + (if ($media | length) > 0 then {mediaFiles: $media} else {} end)
+      + (if $at == "" then {status: "draft"} else {status: "scheduled", scheduledAt: $at, timezone: $tz} end)')"
     api POST /api/posts "$body"
     id="$(jq -r '.id // empty' <<<"$BODY")"
     [[ "$id" =~ ^[0-9]+$ ]] || fail "BulkPublish didn't return the new post."
@@ -192,9 +318,12 @@ case "$cmd" in
       if ! out="$(api POST "/api/posts/$id/publish")" || [ -n "$out" ]; then
         # Publishing refused: take the draft back out so nothing half-made is left.
         api DELETE "/api/posts/$id" >/dev/null 2>&1
+        forget_uploads
         echo "$out"; exit 0
       fi
     fi
+    # The post owns its media now.
+    UPLOADED=()
     jq -cn --argjson id "$id" --arg mode "$mode" --arg label "$LABEL" '{ok:true,id:$id,mode:$mode,label:$label}'
     ;;
   retry)
@@ -210,7 +339,7 @@ case "$cmd" in
     echo '{"ok":true}'
     ;;
   *)
-    sed -n '9,18p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '9,20p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
     ;;
 esac

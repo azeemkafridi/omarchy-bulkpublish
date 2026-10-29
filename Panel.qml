@@ -77,6 +77,28 @@ Panel {
     proc.running = true
   }
 
+  // Runs an InputProcess with `input` on its stdin. Anything the user wrote,
+  // typed or picked travels this way, never in args: another local account
+  // can read any process's command line while it runs.
+  function runWithInput(proc, args, input) {
+    if (proc.running) return
+    proc.pendingInput = input
+    proc.stdinEnabled = true
+    run(proc, args)
+  }
+
+  // A Process that writes pendingInput to stdin as it starts, then closes
+  // stdin so the script sees the end of it.
+  component InputProcess: Process {
+    id: inputProc
+    property string pendingInput: ""
+    onStarted: {
+      inputProc.write(inputProc.pendingInput)
+      inputProc.pendingInput = ""
+      inputProc.stdinEnabled = false
+    }
+  }
+
   function refresh() {
     root.run(channelsProc, ["channels"])
     root.run(postsProc, ["posts", String(root.recentCount)])
@@ -129,11 +151,9 @@ Panel {
     notice = ""
     sending = true
     sendProc.mode = mode
-    // Text and file paths go in on stdin, never in argv: another local account
-    // can read any process's command line while it runs.
-    sendProc.pendingText = JSON.stringify({ text: composer.text, files: attachments })
-    sendProc.stdinEnabled = true
-    run(sendProc, ["send", mode, ids.join(",")].concat(mode === "at" ? [whenInput.text] : []))
+    var input = { text: composer.text, files: attachments }
+    if (mode === "at") input.when = whenInput.text
+    runWithInput(sendProc, ["send", mode, ids.join(",")], JSON.stringify(input))
   }
 
   // Ask the helper how the typed time reads, so the user sees the exact date
@@ -141,7 +161,7 @@ Panel {
   function checkWhen() {
     if (whenProc.running) { whenDebounce.restart(); return }
     whenProc.asked = whenInput.text
-    root.run(whenProc, ["when", whenInput.text])
+    root.runWithInput(whenProc, ["when"], whenInput.text)
   }
 
   function openApp(path) {
@@ -204,15 +224,9 @@ Panel {
     }
   }
 
-  Process {
+  InputProcess {
     id: sendProc
     property string mode: ""
-    property string pendingText: ""
-    onStarted: {
-      sendProc.write(sendProc.pendingText)
-      sendProc.pendingText = ""
-      sendProc.stdinEnabled = false   // closes stdin, so the script sees end of input
-    }
     stdout: StdioCollector {
       onStreamFinished: {
         root.sending = false
@@ -256,7 +270,7 @@ Panel {
     }
   }
 
-  Process {
+  InputProcess {
     id: whenProc
     property string asked: ""
     stdout: StdioCollector {

@@ -5,7 +5,8 @@ the Omarchy bar opens a small composer: write the post, attach images, videos or
 documents, pick the channels, and post it now, add it to your queue, schedule it
 for a time you type, or save it as a draft to finish in BulkPublish. Your most recent
 posts are listed underneath with how they went, and anything that failed can be
-retried in one click. The icon lights up when a recent post failed.
+retried in one click. The logo matches your theme, and turns your theme's
+warning colour when a recent post failed.
 
 ## Requirements
 
@@ -62,6 +63,14 @@ anything uploaded for it is removed again.
 network. Channels that need reconnecting are shown greyed out; reconnect them in
 BulkPublish.
 
+The panel sends the same post to every channel you pick, with each network's
+defaults: YouTube takes the first line of your text as the video's title, and
+Pinterest pins to your default board. To choose per-network settings, such as a
+specific board, a separate title, a Reel or Story, or a first comment, save a
+draft and finish it in BulkPublish. Networks that only take images or videos
+(Instagram, TikTok, YouTube, Pinterest) turn down a text-only post; the panel
+says so before anything is sent.
+
 From a terminal or a keybinding:
 
 ```sh
@@ -86,13 +95,17 @@ if you no longer need it.
 
 ## Privacy and permissions
 
-The plugin talks only to `app.bulkpublish.com`, using your API key, and opens
-links in your default browser. It runs no installer, needs no root access, and
-changes no other configuration.
+The plugin talks to `app.bulkpublish.com` using your API key. Videos over
+100 MB are uploaded in parts straight to BulkPublish's media storage, through
+upload links BulkPublish issues for that one upload. It opens links in your
+default browser and files through your desktop's own file picker. It runs no
+installer, needs no root access, and changes no other configuration.
 
-Your post text, attached file names and API key are never put on a command line, so other accounts
-on the same machine cannot read them from the process list. The key is saved
-readable by you only.
+Nothing you write, type or choose is ever put on a command line: not your post
+text, not the names or locations of the files you attach (or their type or
+size), not the time you schedule for, and not your API key. Other accounts on
+the same computer can read any program's command line while it runs, so all of
+it is passed privately instead. The key is saved readable by you only.
 
 ## License
 

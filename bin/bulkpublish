@@ -6,19 +6,29 @@
 # {"ok":true,...} or {"ok":false,"error":"..."}. Keeping every request here
 # means the API key is only ever read by this file, never handed to QML.
 #
+# Nothing the user wrote, typed or picked is ever a process argument, here or
+# in anything this script runs: any local account can read a running process's
+# command line. It arrives on stdin, and reaches jq, curl and date as file
+# contents (stdin, a <(...) file, or a curl config on fd 3). Arguments carry
+# only commands, ids, sizes and types.
+#
 #   bulkpublish login            read an API key from the terminal and save it
 #   bulkpublish logout           forget the saved key
 #   bulkpublish status           is a key saved, and does BulkPublish accept it
 #   bulkpublish channels         connected channels
 #   bulkpublish posts [limit]    recent posts, newest first
-#   bulkpublish send <now|draft|queue|at> <channel-ids,comma,separated> [when]
-#                                stdin: {"text":"...","files":["/path",...]}
-#                                "at" takes a time like "fri 14:30"
+#   bulkpublish send <now|draft|queue|at> <channel-ids,comma,separated>
+#                                stdin: {"text":"...","files":["/path",...],
+#                                        "when":"fri 14:30"}  (when: "at" only)
 #   bulkpublish pick             choose media files in the desktop's file picker
-#   bulkpublish when <time>      how a typed time is understood, without posting
+#   bulkpublish when             how a typed time (on stdin) is understood
 #   bulkpublish retry <post-id>
 #   bulkpublish open [path]      open BulkPublish in the browser
 set -uo pipefail
+
+# file_of VALUE -> prints it, for handing to a program as <(file_of "$v")
+# instead of as an argument.
+file_of() { printf '%s' "$1"; }
 
 API_BASE="${BULKPUBLISH_API_BASE:-https://app.bulkpublish.com}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/bulkpublish"
@@ -27,7 +37,9 @@ KEY_FILE="$CONFIG_DIR/omarchy-api-key"
 # Media uploaded for a post that then fails to be created is deleted again, so
 # a refused post leaves nothing behind in the library.
 UPLOADED=()
-fail() { forget_uploads; jq -cn --arg e "$1" '{ok:false,error:$e}'; exit 0; }
+# Messages can name the user's files or repeat what the server said about a
+# post, so they reach jq as a file, never as an argument.
+fail() { forget_uploads; jq -cn --rawfile e <(file_of "$1") '{ok:false,error:$e}'; exit 0; }
 
 # GNU date reads "tomorrow 9:00" and friends. Omarchy ships it as date; gdate is
 # for running this script on a Mac.
@@ -49,9 +61,10 @@ local_tz() {
 # when_at TEXT -> sets AT (ISO, UTC) and LABEL, or fails with a message the
 # panel can show as is.
 when_at() {
-  local text="$1" epoch now
+  local text="${1//[$'\n\r']/ }" epoch now
   [ -n "${text//[[:space:]]/}" ] || fail "Type when to post it, like tomorrow 9:00."
-  epoch="$($DATE -d "$text" +%s 2>/dev/null)" || fail "Couldn't read that time. Try tomorrow 9:00 or 2026-11-03 18:00."
+  # date -f reads the time from stdin, so what was typed is never an argument.
+  epoch="$(printf '%s\n' "$text" | $DATE -f - +%s 2>/dev/null)" || fail "Couldn't read that time. Try tomorrow 9:00 or 2026-11-03 18:00."
   [[ "$epoch" =~ ^[0-9]+$ ]] || fail "Couldn't read that time. Try tomorrow 9:00 or 2026-11-03 18:00."
   now="$($DATE +%s)"
   [ "$epoch" -gt $((now + 60)) ] || fail "That time has already passed."
@@ -169,7 +182,10 @@ upload() {
 # fails is retried on its own rather than restarting the whole file.
 upload_large() {
   local path="$1" name="$2" mime="$3" size="$4" key upload_id count i url res etag parts="[]" urls
-  api POST /api/media/multipart/create "$(jq -cn --arg m "$mime" --argjson s "$size" '{contentType:$m,sizeBytes:$s}')"
+  # Everything about the file, down to its type and exact size, reaches jq as
+  # file contents rather than arguments.
+  api POST /api/media/multipart/create "$(jq -cn --rawfile m <(file_of "$mime") --rawfile s <(file_of "$size") \
+    '{contentType:$m,sizeBytes:($s|tonumber)}')"
   urls="$BODY"
   key="$(jq -r '.r2Key // empty' <<<"$urls")"
   upload_id="$(jq -r '.uploadId // empty' <<<"$urls")"
@@ -187,14 +203,18 @@ upload_large() {
       if [ "${res%% *}" = 200 ] && [ -n "${res#* }" ]; then etag="${res#* }"; break; fi
     done
     if [ -z "$etag" ]; then
-      ( api POST /api/media/multipart/abort "$(jq -cn --arg k "$key" --arg u "$upload_id" '{r2Key:$k,uploadId:$u}')" ) >/dev/null 2>&1
+      ( api POST /api/media/multipart/abort "$(jq -cn --rawfile k <(file_of "$key") --rawfile u <(file_of "$upload_id") \
+          '{r2Key:$k,uploadId:$u}')" ) >/dev/null 2>&1
       fail "Couldn't upload $name. Check your connection and try again."
     fi
-    parts="$(jq -c --argjson n $((i + 1)) --arg e "$etag" '. + [{partNumber:$n,etag:$e}]' <<<"$parts")"
+    parts="$(jq -c --argjson n $((i + 1)) --rawfile e <(file_of "$etag") '. + [{partNumber:$n,etag:$e}]' <<<"$parts")"
   done
-  api POST /api/media/multipart/complete "$(jq -cn --arg k "$key" --arg u "$upload_id" --argjson p "$parts" \
-    --arg f "$name" --arg m "$mime" --argjson s "$size" \
-    '{r2Key:$k,uploadId:$u,parts:$p,fileName:$f,mimeType:$m,sizeBytes:$s}')"
+  # The file name above all: as an argument, any local account could read the
+  # name of a video from a folder only its owner can open.
+  api POST /api/media/multipart/complete "$(jq -cn --rawfile k <(file_of "$key") --rawfile u <(file_of "$upload_id") \
+    --rawfile p <(file_of "$parts") --rawfile f <(file_of "$name") --rawfile m <(file_of "$mime") \
+    --rawfile s <(file_of "$size") \
+    '{r2Key:$k,uploadId:$u,parts:($p|fromjson),fileName:$f,mimeType:$m,sizeBytes:($s|tonumber)}')"
 }
 
 # Delete what this run uploaded. Best effort and silent: it runs on the way out
@@ -236,8 +256,8 @@ esac
 need
 case "$cmd" in
   when)
-    when_at "${1:-}"
-    jq -cn --arg at "$AT" --arg label "$LABEL" '{ok:true,at:$at,label:$label}'
+    when_at "$(cat)"
+    jq -cn --rawfile at <(file_of "$AT") --rawfile label <(file_of "$LABEL") '{ok:true,at:$at,label:$label}'
     ;;
   pick)
     # The desktop's own file picker, through the portal every Omarchy install
@@ -280,7 +300,8 @@ case "$cmd" in
     ;;
   send)
     mode="${1:-}" ids="${2:-}"
-    # Text and file paths arrive on stdin so they never appear in the process list.
+    # Text, file paths and the time arrive on stdin so they never appear in the
+    # process list.
     input="$(cat)"
     text="$(jq -r '.text // ""' <<<"$input" 2>/dev/null)" || fail "Write something first."
     files=()
@@ -293,7 +314,7 @@ case "$cmd" in
     for f in "${files[@]+"${files[@]}"}"; do check_file "$f"; done
     # Check a typed time before anything is sent, so a typo costs nothing.
     AT="" LABEL=""
-    [ "$mode" = at ] && when_at "${3:-}"
+    [ "$mode" = at ] && when_at "$(jq -r '.when // ""' <<<"$input" 2>/dev/null)"
     read_key
     tz="$(local_tz)"
     if [ "$mode" = queue ]; then
@@ -312,8 +333,8 @@ case "$cmd" in
       fail "Those channels are no longer connected. Refresh and pick again."
     for f in "${files[@]+"${files[@]}"}"; do upload "$f"; done
     media="$(printf '%s\n' "${UPLOADED[@]+"${UPLOADED[@]}"}" | jq -cRs 'split("\n") | map(select(. != "") | tonumber)')"
-    body="$(jq -cn --rawfile text <(printf '%s' "$text") --argjson ch "$channels" --argjson media "$media" \
-      --arg at "$AT" --arg tz "$tz" '
+    body="$(jq -cn --rawfile text <(file_of "$text") --argjson ch "$channels" --argjson media "$media" \
+      --rawfile at <(file_of "$AT") --arg tz "$tz" '
       {content: $text, channels: $ch}
       + (if ($media | length) > 0 then {mediaFiles: $media} else {} end)
       + (if $at == "" then {status: "draft"} else {status: "scheduled", scheduledAt: $at, timezone: $tz} end)')"
@@ -334,7 +355,7 @@ case "$cmd" in
     fi
     # The post owns its media now.
     UPLOADED=()
-    jq -cn --argjson id "$id" --arg mode "$mode" --arg label "$LABEL" '{ok:true,id:$id,mode:$mode,label:$label}'
+    jq -cn --argjson id "$id" --arg mode "$mode" --rawfile label <(file_of "$LABEL") '{ok:true,id:$id,mode:$mode,label:$label}'
     ;;
   retry)
     [[ "${1:-}" =~ ^[0-9]+$ ]] || fail "No post to retry."
@@ -349,7 +370,7 @@ case "$cmd" in
     echo '{"ok":true}'
     ;;
   *)
-    sed -n '9,20p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '15,26p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
     ;;
 esac

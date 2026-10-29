@@ -1,6 +1,6 @@
 # BulkPublish for Omarchy
 
-Post to your social channels without leaving the desktop. A paper-plane icon in
+Post to your social channels without leaving the desktop. The BulkPublish logo in
 the Omarchy bar opens a small composer: write the post, attach images, videos or
 documents, pick the channels, and post it now, add it to your queue, schedule it
 for a time you type, or save it as a draft to finish in BulkPublish. Your most recent

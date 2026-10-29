@@ -12,8 +12,7 @@ import qs.Ui
 // through a shell. That script is the only thing that reads the API key, so the
 // key never passes through QML or the shell's settings file.
 //
-// Glyphs are \u escapes so the source survives editors that mangle
-// private-use codepoints.
+// The bar icon is our own mark, drawn by BulkPublishIcon.qml.
 Panel {
   id: root
   moduleName: "com.bulkpublish.omarchy"
@@ -311,8 +310,13 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // nf-fa-paper_plane
-    text: ""
+    // Our own mark in the bar's colour, turning the theme's warning colour
+    // when a recent post failed, as the glyph-based widgets do.
+    iconComponent: Component {
+      BulkPublishIcon {
+        color: button.active && button.useActiveColor ? button.activeColor : button.foreground
+      }
+    }
     active: root.hasFailed
     dimmed: root.connState === "signed-out" || root.connState === "error"
     tooltipText: root.connState === "signed-out" ? "BulkPublish: not signed in"

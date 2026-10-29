@@ -95,7 +95,7 @@ settle() {
 api() {
   local method="$1" path="$2" data="${3:-}" out
   local args=(-sS --max-time 30 -X "$method" -w '\n%{http_code}'
-    -H "Accept: application/json" -H "User-Agent: bulkpublish-omarchy/1.2.0")
+    -H "Accept: application/json" -H "User-Agent: bulkpublish-omarchy/1.2.1")
   # Neither the key nor the body is ever an argv value, because any local
   # account can read a running process's command line. The key goes in as a
   # header file on fd 3 and the body on stdin.
@@ -152,7 +152,7 @@ upload() {
   safe="${name//[\"\\[:cntrl:]]/_}"
   if [ "$size" -le $((100 * MB)) ]; then
     out="$(curl -sS --max-time 900 -w '\n%{http_code}' -H "Accept: application/json" \
-      -H "User-Agent: bulkpublish-omarchy/1.2.0" -K /dev/fd/3 "$API_BASE/api/media" <"$path" \
+      -H "User-Agent: bulkpublish-omarchy/1.2.1" -K /dev/fd/3 "$API_BASE/api/media" <"$path" \
       3< <(printf 'header = "Authorization: Bearer %s"\nform = "file=@-;filename=\\"%s\\";type=%s"\n' \
              "$KEY" "$safe" "$mime") 2>/dev/null)" ||
       fail "Couldn't upload $name. Check your connection and try again."

@@ -11,7 +11,7 @@
 #   bulkpublish status           is a key saved, and does BulkPublish accept it
 #   bulkpublish channels         connected channels
 #   bulkpublish posts [limit]    recent posts, newest first
-#   bulkpublish send <now|draft> <channel-ids,comma,separated> <text>
+#   bulkpublish send <now|draft> <channel-ids,comma,separated>   (text on stdin)
 #   bulkpublish retry <post-id>
 #   bulkpublish open [path]      open BulkPublish in the browser
 set -uo pipefail
@@ -38,11 +38,13 @@ api() {
   local method="$1" path="$2" data="${3:-}" out
   local args=(-sS --max-time 30 -X "$method" -w '\n%{http_code}'
     -H "Accept: application/json" -H "User-Agent: bulkpublish-omarchy/1.0.0")
-  # The key goes in through a header file on stdin, so it never shows up in
-  # the process list the way an argv value would.
-  args+=(-H @-)
-  if [ -n "$data" ]; then args+=(-H "Content-Type: application/json" --data-binary "$data"); fi
-  out="$(printf 'Authorization: Bearer %s\n' "$KEY" | curl "${args[@]}" "$API_BASE$path" 2>/dev/null)" ||
+  # Neither the key nor the body is ever an argv value, because any local
+  # account can read a running process's command line. The key goes in as a
+  # header file on fd 3 and the body on stdin.
+  args+=(-H @/dev/fd/3)
+  if [ -n "$data" ]; then args+=(-H "Content-Type: application/json" --data-binary @-); fi
+  out="$(printf '%s' "$data" |
+    curl "${args[@]}" "$API_BASE$path" 3< <(printf 'Authorization: Bearer %s\n' "$KEY") 2>/dev/null)" ||
     fail "Couldn't reach BulkPublish. Check your connection and try again."
   CODE="$(tail -n 1 <<<"$out")"
   BODY="$(sed '$d' <<<"$out")"
@@ -120,7 +122,9 @@ case "$cmd" in
       }]}' <<<"$BODY"
     ;;
   send)
-    mode="${1:-}" ids="${2:-}" text="${3:-}"
+    mode="${1:-}" ids="${2:-}"
+    # The post text arrives on stdin so it never appears in the process list.
+    text="$(cat)"
     [ "$mode" = now ] || [ "$mode" = draft ] || fail "Choose post now or save as draft."
     [[ "$ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "Pick at least one channel."
     [ -n "${text//[[:space:]]/}" ] || fail "Write something first."
@@ -128,7 +132,7 @@ case "$cmd" in
     # The body needs each channel's platform, so look them up rather than
     # trusting whatever the panel last saw.
     api GET /api/channels
-    body="$(jq -c --arg ids "$ids" --arg text "$text" '
+    body="$(jq -c --arg ids "$ids" --rawfile text <(printf '%s' "$text") '
       ($ids | split(",") | map(tonumber)) as $want
       | [(.channels // [])[] | select(.id as $i | $want | index($i)) | {channelId: .id, platform}] as $ch
       | if ($ch | length) == 0 then error("none") else {content: $text, status: "draft", channels: $ch} end' \

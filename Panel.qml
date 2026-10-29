@@ -81,10 +81,15 @@ Panel {
     for (var k in selected) if (selected[k]) ids.push(k)
     if (composer.text.trim() === "") { notice = "Write something first."; return }
     if (ids.length === 0) { notice = "Pick at least one channel."; return }
+    if (sendProc.running) return
     notice = ""
     sending = true
     sendProc.mode = mode
-    run(sendProc, ["send", mode, ids.join(","), composer.text])
+    // The text goes in on stdin, never in argv: another local account can
+    // read any process's command line while it runs.
+    sendProc.pendingText = composer.text
+    sendProc.stdinEnabled = true
+    run(sendProc, ["send", mode, ids.join(",")])
   }
 
   function openApp(path) {
@@ -150,6 +155,12 @@ Panel {
   Process {
     id: sendProc
     property string mode: ""
+    property string pendingText: ""
+    onStarted: {
+      sendProc.write(sendProc.pendingText)
+      sendProc.pendingText = ""
+      sendProc.stdinEnabled = false   // closes stdin, so the script sees end of input
+    }
     stdout: StdioCollector {
       onStreamFinished: {
         root.sending = false

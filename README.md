@@ -72,6 +72,10 @@ The plugin talks only to `app.bulkpublish.com`, using your API key, and opens
 links in your default browser. It runs no installer, needs no root access, and
 changes no other configuration.
 
+Your post text and API key are never put on a command line, so other accounts
+on the same machine cannot read them from the process list. The key is saved
+readable by you only.
+
 ## License
 
 MIT

@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# BulkPublish for Omarchy: the part that talks to BulkPublish.
+#
+# The panel never builds a request itself. It runs this script with an argv
+# array (never through a shell) and reads one JSON object back on stdout:
+# {"ok":true,...} or {"ok":false,"error":"..."}. Keeping every request here
+# means the API key is only ever read by this file, never handed to QML.
+#
+#   bulkpublish login            read an API key from the terminal and save it
+#   bulkpublish logout           forget the saved key
+#   bulkpublish status           is a key saved, and does BulkPublish accept it
+#   bulkpublish channels         connected channels
+#   bulkpublish posts [limit]    recent posts, newest first
+#   bulkpublish send <now|draft> <channel-ids,comma,separated> <text>
+#   bulkpublish retry <post-id>
+#   bulkpublish open [path]      open BulkPublish in the browser
+set -uo pipefail
+
+API_BASE="${BULKPUBLISH_API_BASE:-https://app.bulkpublish.com}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/bulkpublish"
+KEY_FILE="$CONFIG_DIR/omarchy-api-key"
+
+fail() { jq -cn --arg e "$1" '{ok:false,error:$e}'; exit 0; }
+
+need() {
+  command -v curl >/dev/null 2>&1 || { echo '{"ok":false,"error":"curl is not installed."}'; exit 0; }
+  command -v jq >/dev/null 2>&1 || { echo '{"ok":false,"error":"jq is not installed."}'; exit 0; }
+}
+
+read_key() {
+  [ -r "$KEY_FILE" ] || fail "No API key yet. Run: bulkpublish login"
+  KEY="$(tr -d '[:space:]' <"$KEY_FILE")"
+  [ -n "$KEY" ] || fail "No API key yet. Run: bulkpublish login"
+}
+
+# api METHOD PATH [JSON-BODY]  -> sets BODY and CODE
+api() {
+  local method="$1" path="$2" data="${3:-}" out
+  local args=(-sS --max-time 30 -X "$method" -w '\n%{http_code}'
+    -H "Accept: application/json" -H "User-Agent: bulkpublish-omarchy/1.0.0")
+  # The key goes in through a header file on stdin, so it never shows up in
+  # the process list the way an argv value would.
+  args+=(-H @-)
+  if [ -n "$data" ]; then args+=(-H "Content-Type: application/json" --data-binary "$data"); fi
+  out="$(printf 'Authorization: Bearer %s\n' "$KEY" | curl "${args[@]}" "$API_BASE$path" 2>/dev/null)" ||
+    fail "Couldn't reach BulkPublish. Check your connection and try again."
+  CODE="$(tail -n 1 <<<"$out")"
+  BODY="$(sed '$d' <<<"$out")"
+  [[ "$CODE" =~ ^[0-9]{3}$ ]] || fail "Couldn't reach BulkPublish. Check your connection and try again."
+  if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 300 ]; then return 0; fi
+  local msg
+  msg="$(jq -r 'if (.error|type)=="string" then .error
+               elif (.error|type)=="object" then ((.error.message // "") + (if .error.hint then " " + .error.hint else "" end))
+               else (.message // "") end' <<<"$BODY" 2>/dev/null)"
+  case "$CODE" in
+    401) fail "BulkPublish didn't accept the API key. Run: bulkpublish login" ;;
+    403) [ -n "$msg" ] || msg="This API key is not allowed to do that."; fail "$msg" ;;
+    402|429) [ -n "$msg" ] || msg="You have reached your BulkPublish plan limit."; fail "$msg" ;;
+    5*) fail "BulkPublish is having trouble right now. Try again in a few minutes." ;;
+    *) fail "${msg:-BulkPublish returned an error ($CODE).}" ;;
+  esac
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  login)
+    command -v curl >/dev/null 2>&1 || { echo "curl is not installed." >&2; exit 1; }
+    command -v jq >/dev/null 2>&1 || { echo "jq is not installed." >&2; exit 1; }
+    echo "Create a key in BulkPublish on its API page, then paste it here."
+    printf "API key: "
+    IFS= read -rs KEY; echo
+    KEY="$(printf '%s' "$KEY" | tr -d '[:space:]')"
+    [ -n "$KEY" ] || { echo "Nothing entered, nothing saved." >&2; exit 1; }
+    out="$(api GET /api/channels)"
+    if [ -n "$out" ]; then echo "$(jq -r .error <<<"$out")" >&2; exit 1; fi
+    mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
+    (umask 077 && printf '%s\n' "$KEY" >"$KEY_FILE")
+    echo "Saved. The BulkPublish widget picks it up the next time it refreshes."
+    command -v omarchy-shell >/dev/null 2>&1 && omarchy-shell com.bulkpublish.omarchy refresh >/dev/null 2>&1
+    exit 0
+    ;;
+  logout)
+    rm -f "$KEY_FILE"
+    echo "Forgot the saved API key."
+    exit 0
+    ;;
+esac
+
+need
+case "$cmd" in
+  status)
+    [ -r "$KEY_FILE" ] || { echo '{"ok":true,"signedIn":false}'; exit 0; }
+    read_key
+    api GET /api/channels
+    echo '{"ok":true,"signedIn":true}'
+    ;;
+  channels)
+    read_key
+    api GET /api/channels
+    jq -c '{ok:true, channels: [(.channels // [])[] | {
+        id, platform,
+        name: (.accountName // .name // ("#" + (.id|tostring))),
+        problem: (if .isActive == false then "turned off"
+                  elif .needsReconnect == true or .tokenStatus == "expired" then "needs reconnecting"
+                  elif .platformAvailable == false then "unavailable"
+                  else "" end)
+      }]}' <<<"$BODY"
+    ;;
+  posts)
+    read_key
+    limit="${1:-10}"
+    [[ "$limit" =~ ^[0-9]+$ ]] || limit=10
+    api GET "/api/posts?limit=$limit&order=desc"
+    jq -c '{ok:true, posts: [(.posts // [])[] | {
+        id, status: (.status // "unknown"),
+        content: ((.content // "") | gsub("\\s+"; " ") | .[0:140]),
+        at: (.publishedAt // .scheduledAt // .createdAt // null),
+        platforms: [(.postPlatforms // [])[] | .platform] | unique,
+        error: ([(.postPlatforms // [])[] | .errorMessage // empty] | first // "")
+      }]}' <<<"$BODY"
+    ;;
+  send)
+    mode="${1:-}" ids="${2:-}" text="${3:-}"
+    [ "$mode" = now ] || [ "$mode" = draft ] || fail "Choose post now or save as draft."
+    [[ "$ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "Pick at least one channel."
+    [ -n "${text//[[:space:]]/}" ] || fail "Write something first."
+    read_key
+    # The body needs each channel's platform, so look them up rather than
+    # trusting whatever the panel last saw.
+    api GET /api/channels
+    body="$(jq -c --arg ids "$ids" --arg text "$text" '
+      ($ids | split(",") | map(tonumber)) as $want
+      | [(.channels // [])[] | select(.id as $i | $want | index($i)) | {channelId: .id, platform}] as $ch
+      | if ($ch | length) == 0 then error("none") else {content: $text, status: "draft", channels: $ch} end' \
+      <<<"$BODY" 2>/dev/null)" || fail "Those channels are no longer connected. Refresh and pick again."
+    api POST /api/posts "$body"
+    id="$(jq -r '.id // empty' <<<"$BODY")"
+    [[ "$id" =~ ^[0-9]+$ ]] || fail "BulkPublish didn't return the new post."
+    if [ "$mode" = now ]; then
+      if ! out="$(api POST "/api/posts/$id/publish")" || [ -n "$out" ]; then
+        # Publishing refused: take the draft back out so nothing half-made is left.
+        api DELETE "/api/posts/$id" >/dev/null 2>&1
+        echo "$out"; exit 0
+      fi
+    fi
+    jq -cn --argjson id "$id" --arg mode "$mode" '{ok:true,id:$id,mode:$mode}'
+    ;;
+  retry)
+    [[ "${1:-}" =~ ^[0-9]+$ ]] || fail "No post to retry."
+    read_key
+    api POST "/api/posts/$1/retry" '{}'
+    echo '{"ok":true}'
+    ;;
+  open)
+    path="${1:-/}"
+    [[ "$path" =~ ^/[A-Za-z0-9/_?=\&.-]*$ ]] || path=/
+    xdg-open "$API_BASE$path" >/dev/null 2>&1 &
+    echo '{"ok":true}'
+    ;;
+  *)
+    sed -n '9,17p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+    ;;
+esac

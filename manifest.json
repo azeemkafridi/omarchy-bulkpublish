@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "com.bulkpublish.omarchy",
+  "name": "BulkPublish",
+  "version": "1.0.0",
+  "author": "BulkPublish",
+  "license": "MIT",
+  "homepage": "https://www.bulkpublish.com",
+  "description": "Post to your social channels from the bar: write, pick channels, post now or save a draft, and retry anything that failed.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "BulkPublish",
+    "description": "Write a post, pick channels, and post now or save a draft. Shows your recent posts and lets you retry failed ones.",
+    "category": "Productivity",
+    "aliases": ["bulkpublish", "social", "post", "publish"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshMinutes": 10,
+      "recentCount": 6
+    },
+    "schema": [
+      { "key": "refreshMinutes", "type": "integer", "label": "Refresh every (minutes)", "min": 1, "max": 120, "step": 1, "defaultValue": 10, "description": "How often the bar checks your recent posts, so a failed one lights the icon. Opening the panel always refreshes." },
+      { "key": "recentCount", "type": "integer", "label": "Recent posts shown", "min": 1, "max": 20, "step": 1, "defaultValue": 6 }
+    ]
+  }
+}

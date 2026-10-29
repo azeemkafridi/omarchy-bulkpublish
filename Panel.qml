@@ -66,8 +66,8 @@ Panel {
   }
 
   function refresh() {
-    run(channelsProc, ["channels"])
-    run(postsProc, ["posts", String(root.recentCount)])
+    root.run(channelsProc, ["channels"])
+    root.run(postsProc, ["posts", String(root.recentCount)])
   }
 
   function toggleChannel(id) {
@@ -95,7 +95,7 @@ Panel {
   function statusLabel(s) {
     var names = { draft: "Draft", scheduled: "Scheduled", publishing: "Publishing",
                   processing: "Processing", published: "Published", partial: "Partly failed",
-                  failed: "Failed", pending_approval: "Awaiting approval" }
+                  failed: "Failed" }
     return names[s] || s
   }
 
@@ -157,7 +157,7 @@ Panel {
         if (data.ok !== true) { root.notice = root.plain(data.error); return }
         composer.text = ""
         root.notice = sendProc.mode === "now" ? "Sent. It's publishing now." : "Saved as a draft."
-        run(postsProc, ["posts", String(root.recentCount)])
+        root.run(postsProc, ["posts", String(root.recentCount)])
       }
     }
   }
@@ -168,7 +168,7 @@ Panel {
       onStreamFinished: {
         var data = root.parse(text)
         root.notice = data.ok === true ? "Retrying the failed destinations." : root.plain(data.error)
-        run(postsProc, ["posts", String(root.recentCount)])
+        root.run(postsProc, ["posts", String(root.recentCount)])
       }
     }
   }
@@ -234,7 +234,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(680))
+    contentHeight: panel.fittedContentHeight(body.implicitHeight, Style.space(680))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -245,11 +245,11 @@ Panel {
 
       Flickable {
         anchors.fill: parent
-        contentHeight: content.implicitHeight
+        contentHeight: body.implicitHeight
         clip: true
 
         Column {
-          id: content
+          id: body
           width: parent.width
           spacing: Style.space(10)
 
@@ -384,6 +384,7 @@ Panel {
                   text: root.plain(root.platformLabel(modelData.platform) + " · " + modelData.name
                     + (modelData.problem ? " (" + modelData.problem + ")" : ""))
                   enabled: modelData.problem === ""
+                  opacity: enabled ? 1 : 0.45
                   selected: !!root.selected[modelData.id]
                   bordered: true
                   foreground: root.foreground
@@ -399,6 +400,7 @@ Panel {
               Button {
                 text: root.sending ? "Sending…" : "Post now"
                 enabled: !root.sending
+                opacity: enabled ? 1 : 0.45
                 selected: true
                 bordered: true
                 foreground: root.foreground
@@ -409,6 +411,7 @@ Panel {
               Button {
                 text: "Save draft"
                 enabled: !root.sending
+                opacity: enabled ? 1 : 0.45
                 bordered: true
                 foreground: root.foreground
                 fontFamily: root.fontFamily
@@ -455,6 +458,7 @@ Panel {
             Repeater {
               model: root.posts
               Column {
+                id: postRow
                 required property var modelData
                 readonly property bool failed: modelData.status === "failed" || modelData.status === "partial"
                 width: parent.width
@@ -476,13 +480,13 @@ Panel {
                     text: root.plain(root.statusLabel(modelData.status)
                       + (root.when(modelData.at) ? " · " + root.when(modelData.at) : "")
                       + (modelData.platforms.length ? " · " + modelData.platforms.map(root.platformLabel).join(", ") : ""))
-                    color: parent.parent.failed ? Color.urgent : root.dim
+                    color: postRow.failed ? Color.urgent : root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     textFormat: Text.PlainText
                   }
                   Button {
-                    visible: parent.parent.failed
+                    visible: postRow.failed
                     text: "Retry"
                     bordered: true
                     foreground: root.foreground
@@ -492,7 +496,7 @@ Panel {
                   }
                 }
                 Text {
-                  visible: parent.failed && modelData.error !== ""
+                  visible: postRow.failed && modelData.error !== ""
                   width: parent.width
                   wrapMode: Text.Wrap
                   text: root.plain(modelData.error)

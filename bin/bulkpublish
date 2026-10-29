@@ -28,9 +28,9 @@ need() {
 }
 
 read_key() {
-  [ -r "$KEY_FILE" ] || fail "No API key yet. Run: bulkpublish login"
+  [ -r "$KEY_FILE" ] || fail "No API key yet. Run the login command shown in the panel."
   KEY="$(tr -d '[:space:]' <"$KEY_FILE")"
-  [ -n "$KEY" ] || fail "No API key yet. Run: bulkpublish login"
+  [ -n "$KEY" ] || fail "No API key yet. Run the login command shown in the panel."
 }
 
 # api METHOD PATH [JSON-BODY]  -> sets BODY and CODE
@@ -53,7 +53,7 @@ api() {
                elif (.error|type)=="object" then ((.error.message // "") + (if .error.hint then " " + .error.hint else "" end))
                else (.message // "") end' <<<"$BODY" 2>/dev/null)"
   case "$CODE" in
-    401) fail "BulkPublish didn't accept the API key. Run: bulkpublish login" ;;
+    401) fail "BulkPublish didn't accept the API key. Run the login command shown in the panel again." ;;
     403) [ -n "$msg" ] || msg="This API key is not allowed to do that."; fail "$msg" ;;
     402|429) [ -n "$msg" ] || msg="You have reached your BulkPublish plan limit."; fail "$msg" ;;
     5*) fail "BulkPublish is having trouble right now. Try again in a few minutes." ;;

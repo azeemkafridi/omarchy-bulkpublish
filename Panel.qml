@@ -38,6 +38,13 @@ Panel {
   property var selected: ({})
   property bool sending: false
 
+  // What the main button does: "now", "queue" (the next free slot in the
+  // posting schedule set in BulkPublish) or "at" (a time typed in whenInput).
+  property string postWhen: "now"
+  // How the typed time was understood, e.g. "Fri 30 Oct, 09:00", or why not.
+  property string whenLabel: ""
+  property string whenError: ""
+
   readonly property int selectedCount: {
     var n = 0
     for (var k in selected) if (selected[k]) n++
@@ -81,6 +88,12 @@ Panel {
     for (var k in selected) if (selected[k]) ids.push(k)
     if (composer.text.trim() === "") { notice = "Write something first."; return }
     if (ids.length === 0) { notice = "Pick at least one channel."; return }
+    if (mode === "at" && whenLabel === "") {
+      notice = whenError
+        || (whenInput.text.trim() !== "" ? "Still reading that time. Try again in a moment."
+                                         : "Type when to post it, like tomorrow 9:00.")
+      return
+    }
     if (sendProc.running) return
     notice = ""
     sending = true
@@ -89,7 +102,15 @@ Panel {
     // read any process's command line while it runs.
     sendProc.pendingText = composer.text
     sendProc.stdinEnabled = true
-    run(sendProc, ["send", mode, ids.join(",")])
+    run(sendProc, ["send", mode, ids.join(",")].concat(mode === "at" ? [whenInput.text] : []))
+  }
+
+  // Ask the helper how the typed time reads, so the user sees the exact date
+  // before anything is scheduled. Local only: no request leaves the machine.
+  function checkWhen() {
+    if (whenProc.running) { whenDebounce.restart(); return }
+    whenProc.asked = whenInput.text
+    root.run(whenProc, ["when", whenInput.text])
   }
 
   function openApp(path) {
@@ -167,7 +188,10 @@ Panel {
         var data = root.parse(text)
         if (data.ok !== true) { root.notice = root.plain(data.error); return }
         composer.text = ""
-        root.notice = sendProc.mode === "now" ? "Sent. It's publishing now." : "Saved as a draft."
+        root.notice = sendProc.mode === "now" ? "Sent. It's publishing now."
+          : sendProc.mode === "draft" ? "Saved as a draft."
+          : "Scheduled for " + root.plain(data.label) + "."
+        if (sendProc.mode === "at") whenInput.text = ""
         root.run(postsProc, ["posts", String(root.recentCount)])
       }
     }
@@ -185,6 +209,26 @@ Panel {
   }
 
   Process { id: openProc }
+
+  Process {
+    id: whenProc
+    property string asked: ""
+    stdout: StdioCollector {
+      onStreamFinished: {
+        // The user kept typing: this answer is for text that is gone.
+        if (whenProc.asked !== whenInput.text) return
+        var data = root.parse(text)
+        root.whenLabel = data.ok === true ? root.plain(data.label) : ""
+        root.whenError = data.ok === true ? "" : root.plain(data.error)
+      }
+    }
+  }
+
+  Timer {
+    id: whenDebounce
+    interval: 300
+    onTriggered: root.checkWhen()
+  }
 
   Timer {
     interval: Math.max(1, root.refreshMinutes) * 60000
@@ -250,7 +294,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: composer.activeFocus
+      blocked: composer.activeFocus || whenInput.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { composer.forceActiveFocus() }
 
@@ -349,9 +393,10 @@ Panel {
                   keyCatcher.forceActiveFocus()
                   event.accepted = true
                 }
-                // Ctrl+Enter posts, the way most composers do.
+                // Ctrl+Enter does what the main button does, the way most
+                // composers do.
                 Keys.onReturnPressed: function(event) {
-                  if (event.modifiers & Qt.ControlModifier) { root.send("now"); event.accepted = true }
+                  if (event.modifiers & Qt.ControlModifier) { root.send(root.postWhen); event.accepted = true }
                   else event.accepted = false
                 }
               }
@@ -406,10 +451,103 @@ Panel {
               }
             }
 
+            Text {
+              text: "WHEN"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              textFormat: Text.PlainText
+            }
+
+            Flow {
+              width: parent.width
+              spacing: Style.space(6)
+              Repeater {
+                model: [
+                  { key: "now", label: "Now" },
+                  { key: "queue", label: "Next queue slot" },
+                  { key: "at", label: "Pick a time" }
+                ]
+                Button {
+                  required property var modelData
+                  text: modelData.label
+                  selected: root.postWhen === modelData.key
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  onClicked: {
+                    root.postWhen = modelData.key
+                    if (modelData.key === "at") Qt.callLater(function() { whenInput.forceActiveFocus() })
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              visible: root.postWhen === "at"
+              width: parent.width
+              height: whenInput.implicitHeight + Style.space(12)
+              color: "transparent"
+              border.width: 1
+              border.color: whenInput.activeFocus ? root.foreground : root.dim
+              radius: Style.space(4)
+
+              TextInput {
+                id: whenInput
+                anchors.fill: parent
+                anchors.margins: Style.space(6)
+                verticalAlignment: TextInput.AlignVCenter
+                selectByMouse: true
+                clip: true
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                onTextChanged: {
+                  root.whenLabel = ""
+                  root.whenError = ""
+                  if (text.trim() !== "") whenDebounce.restart()
+                  else whenDebounce.stop()
+                }
+                Keys.onEscapePressed: function(event) {
+                  keyCatcher.forceActiveFocus()
+                  event.accepted = true
+                }
+                Keys.onReturnPressed: function(event) {
+                  root.send("at")
+                  event.accepted = true
+                }
+              }
+              Text {
+                visible: whenInput.text === ""
+                anchors.fill: whenInput
+                verticalAlignment: Text.AlignVCenter
+                text: "tomorrow 9:00, fri 14:30, 2026-11-03 18:00"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                textFormat: Text.PlainText
+              }
+            }
+
+            Text {
+              visible: root.postWhen === "at" && (root.whenLabel !== "" || root.whenError !== "")
+              width: parent.width
+              wrapMode: Text.Wrap
+              text: root.whenLabel !== "" ? "Posts " + root.whenLabel + ", your time" : root.whenError
+              color: root.whenLabel !== "" ? root.foreground : Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              textFormat: Text.PlainText
+            }
+
             Row {
               spacing: Style.space(8)
               Button {
-                text: root.sending ? "Sending…" : "Post now"
+                text: root.sending ? "Sending…"
+                  : root.postWhen === "queue" ? "Add to queue"
+                  : root.postWhen === "at" ? "Schedule"
+                  : "Post now"
                 enabled: !root.sending
                 opacity: enabled ? 1 : 0.45
                 selected: true
@@ -417,7 +555,7 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 fontSize: Style.font.bodySmall
-                onClicked: root.send("now")
+                onClicked: root.send(root.postWhen)
               }
               Button {
                 text: "Save draft"

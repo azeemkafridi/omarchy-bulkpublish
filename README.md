@@ -2,7 +2,8 @@
 
 Post to your social channels without leaving the desktop. A paper-plane icon in
 the Omarchy bar opens a small composer: write the post, pick the channels, and
-post it now or save it as a draft to finish in BulkPublish. Your most recent
+post it now, add it to your queue, schedule it for a time you type, or save it as
+a draft to finish in BulkPublish. Your most recent
 posts are listed underneath with how they went, and anything that failed can be
 retried in one click. The icon lights up when a recent post failed.
 
@@ -36,11 +37,20 @@ user alone. The panel itself never sees the key.
 | Click the icon | Open or close the composer |
 | Right-click | Refresh |
 | Middle-click | Open the BulkPublish composer in your browser |
-| Ctrl+Enter in the text box | Post now |
+| Ctrl+Enter in the text box | Post, queue or schedule, whichever is chosen under **When** |
 | Esc | Leave the text box, then close the panel |
 
-**Post now** publishes to every selected channel straight away. **Save draft**
-keeps it in BulkPublish, where you can add media, schedule it, or tailor it per
+Under **When**, choose:
+
+- **Now**: publishes to every selected channel straight away.
+- **Next queue slot**: schedules it into the next free time in the posting
+  schedule you set in BulkPublish.
+- **Pick a time**: type a time the way you would say it, such as
+  `tomorrow 9:00`, `fri 14:30`, `next monday 10am` or `2026-11-03 18:00`. The
+  panel shows the exact date it understood before you schedule, in your
+  computer's timezone.
+
+**Save draft** keeps it in BulkPublish, where you can add media or tailor it per
 network. Channels that need reconnecting are shown greyed out; reconnect them in
 BulkPublish.
 

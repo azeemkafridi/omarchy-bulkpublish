@@ -11,7 +11,9 @@
 #   bulkpublish status           is a key saved, and does BulkPublish accept it
 #   bulkpublish channels         connected channels
 #   bulkpublish posts [limit]    recent posts, newest first
-#   bulkpublish send <now|draft> <channel-ids,comma,separated>   (text on stdin)
+#   bulkpublish send <now|draft|queue|at> <channel-ids,comma,separated> [when]
+#                                text on stdin; "at" takes a time like "fri 14:30"
+#   bulkpublish when <time>      how a typed time is understood, without posting
 #   bulkpublish retry <post-id>
 #   bulkpublish open [path]      open BulkPublish in the browser
 set -uo pipefail
@@ -21,6 +23,36 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/bulkpublish"
 KEY_FILE="$CONFIG_DIR/omarchy-api-key"
 
 fail() { jq -cn --arg e "$1" '{ok:false,error:$e}'; exit 0; }
+
+# GNU date reads "tomorrow 9:00" and friends. Omarchy ships it as date; gdate is
+# for running this script on a Mac.
+DATE=date
+if ! date -d @0 >/dev/null 2>&1 && command -v gdate >/dev/null 2>&1; then DATE=gdate; fi
+
+# The machine's IANA timezone, so BulkPublish shows and counts scheduled posts
+# in the same day the user sees. Anything that does not look like a zone name
+# falls back to UTC rather than being sent.
+local_tz() {
+  local tz="${TZ:-}"
+  [ -n "$tz" ] || tz="$(timedatectl show -p Timezone --value 2>/dev/null)"
+  [ -n "$tz" ] || tz="$(readlink /etc/localtime 2>/dev/null | sed -n 's|.*/zoneinfo/||p')"
+  tz="${tz#:}"
+  [[ "$tz" =~ ^[A-Za-z]+(/[A-Za-z0-9_+-]+)*$ ]] || tz=UTC
+  printf '%s' "$tz"
+}
+
+# when_at TEXT -> sets AT (ISO, UTC) and LABEL, or fails with a message the
+# panel can show as is.
+when_at() {
+  local text="$1" epoch now
+  [ -n "${text//[[:space:]]/}" ] || fail "Type when to post it, like tomorrow 9:00."
+  epoch="$($DATE -d "$text" +%s 2>/dev/null)" || fail "Couldn't read that time. Try tomorrow 9:00 or 2026-11-03 18:00."
+  [[ "$epoch" =~ ^[0-9]+$ ]] || fail "Couldn't read that time. Try tomorrow 9:00 or 2026-11-03 18:00."
+  now="$($DATE +%s)"
+  [ "$epoch" -gt $((now + 60)) ] || fail "That time has already passed."
+  AT="$($DATE -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ)"
+  LABEL="$($DATE -d "@$epoch" '+%a %-d %b, %H:%M')"
+}
 
 need() {
   command -v curl >/dev/null 2>&1 || { echo '{"ok":false,"error":"curl is not installed."}'; exit 0; }
@@ -37,7 +69,7 @@ read_key() {
 api() {
   local method="$1" path="$2" data="${3:-}" out
   local args=(-sS --max-time 30 -X "$method" -w '\n%{http_code}'
-    -H "Accept: application/json" -H "User-Agent: bulkpublish-omarchy/1.0.0")
+    -H "Accept: application/json" -H "User-Agent: bulkpublish-omarchy/1.1.0")
   # Neither the key nor the body is ever an argv value, because any local
   # account can read a running process's command line. The key goes in as a
   # header file on fd 3 and the body on stdin.
@@ -90,6 +122,10 @@ esac
 
 need
 case "$cmd" in
+  when)
+    when_at "${1:-}"
+    jq -cn --arg at "$AT" --arg label "$LABEL" '{ok:true,at:$at,label:$label}'
+    ;;
   status)
     [ -r "$KEY_FILE" ] || { echo '{"ok":true,"signedIn":false}'; exit 0; }
     read_key
@@ -125,18 +161,30 @@ case "$cmd" in
     mode="${1:-}" ids="${2:-}"
     # The post text arrives on stdin so it never appears in the process list.
     text="$(cat)"
-    [ "$mode" = now ] || [ "$mode" = draft ] || fail "Choose post now or save as draft."
+    case "$mode" in now|draft|queue|at) ;; *) fail "Choose when to post it." ;; esac
     [[ "$ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail "Pick at least one channel."
     [ -n "${text//[[:space:]]/}" ] || fail "Write something first."
+    # Check a typed time before anything is sent, so a typo costs nothing.
+    AT="" LABEL=""
+    [ "$mode" = at ] && when_at "${3:-}"
     read_key
+    tz="$(local_tz)"
+    if [ "$mode" = queue ]; then
+      api GET "/api/posts/queue-slot?timezone=$tz"
+      AT="$(jq -r '.scheduledAt // empty' <<<"$BODY")"
+      epoch="$($DATE -d "$AT" +%s 2>/dev/null)" || fail "BulkPublish didn't return a queue slot."
+      LABEL="$($DATE -d "@$epoch" '+%a %-d %b, %H:%M')"
+    fi
     # The body needs each channel's platform, so look them up rather than
     # trusting whatever the panel last saw.
     api GET /api/channels
     body="$(jq -c --arg ids "$ids" --rawfile text <(printf '%s' "$text") '
       ($ids | split(",") | map(tonumber)) as $want
       | [(.channels // [])[] | select(.id as $i | $want | index($i)) | {channelId: .id, platform}] as $ch
-      | if ($ch | length) == 0 then error("none") else {content: $text, status: "draft", channels: $ch} end' \
-      <<<"$BODY" 2>/dev/null)" || fail "Those channels are no longer connected. Refresh and pick again."
+      | if ($ch | length) == 0 then error("none")
+        elif $at == "" then {content: $text, status: "draft", channels: $ch}
+        else {content: $text, status: "scheduled", scheduledAt: $at, timezone: $tz, channels: $ch} end' \
+      --arg at "$AT" --arg tz "$tz" <<<"$BODY" 2>/dev/null)" || fail "Those channels are no longer connected. Refresh and pick again."
     api POST /api/posts "$body"
     id="$(jq -r '.id // empty' <<<"$BODY")"
     [[ "$id" =~ ^[0-9]+$ ]] || fail "BulkPublish didn't return the new post."
@@ -147,7 +195,7 @@ case "$cmd" in
         echo "$out"; exit 0
       fi
     fi
-    jq -cn --argjson id "$id" --arg mode "$mode" '{ok:true,id:$id,mode:$mode}'
+    jq -cn --argjson id "$id" --arg mode "$mode" --arg label "$LABEL" '{ok:true,id:$id,mode:$mode,label:$label}'
     ;;
   retry)
     [[ "${1:-}" =~ ^[0-9]+$ ]] || fail "No post to retry."
@@ -162,7 +210,7 @@ case "$cmd" in
     echo '{"ok":true}'
     ;;
   *)
-    sed -n '9,17p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '9,18p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
     ;;
 esac

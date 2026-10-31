@@ -1,5 +1,7 @@
 # BulkPublish for Omarchy
 
+**Website:** [bulkpublish.com](https://www.bulkpublish.com)
+
 Post to your social channels without leaving the desktop. The BulkPublish logo in
 the Omarchy bar opens a small composer: write the post, attach images, videos or
 documents, pick the channels, and post it now, add it to your queue, schedule it
